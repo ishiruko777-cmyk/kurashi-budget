@@ -1,6 +1,6 @@
-import {validateState,emptyState} from './core.js';
-import {mergeStates,hasHouseholdData,sameState} from './sync-core.js';
-import {firebaseConfig} from './firebase-config.js';
+import {validateState,emptyState} from './core.js?v=93fac7aaad8b';
+import {mergeStates,hasHouseholdData,sameState} from './sync-core.js?v=93fac7aaad8b';
+import {firebaseConfig} from './firebase-config.js?v=93fac7aaad8b';
 
 export function createSync({key,getState,applyState,onStatus,disabled=false,sdkLoader}){
  let config=firebaseConfig,api,auth,db,user,unsubscribe,meta=null,busy=false,again=false,conflict=null,timer;

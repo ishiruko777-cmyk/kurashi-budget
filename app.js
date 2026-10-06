@@ -1,5 +1,5 @@
-import {createSync} from './sync.js';
-import {id,today,addDays,days,monthDate,day,money,emptyState,validateState,calculate,budgets,budgetPeriod,payroll,shiftPay,cancelTransaction,cancelGeneratedEvent,resolvePayment} from './core.js';
+import {createSync} from './sync.js?v=93fac7aaad8b';
+import {id,today,addDays,days,monthDate,day,money,emptyState,validateState,calculate,budgets,budgetPeriod,payroll,shiftPay,cancelTransaction,cancelGeneratedEvent,resolvePayment} from './core.js?v=93fac7aaad8b';
 const testing=new URLSearchParams(location.search).has('test');
 const KEY='kurashi-budget-v1'+(testing?'-test':''),BACKUP=KEY+'-previous';
 let state=emptyState(),loadError='',tab='home',section='',filter='all',group='all',view='list',selectedDate='',calendarMonth=today().slice(0,7)+'-01',result,setupStep=0;
