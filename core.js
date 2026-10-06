@@ -17,7 +17,7 @@ export function validateState(s){
  if(!s||s.version!==1||!s.settings||collections.some(k=>!Array.isArray(s[k])))throw Error('対応していないバックアップ形式です。');
  const walk=(v,key='')=>{if(typeof v==='number'&&(!Number.isFinite(v)||Math.abs(v)>1e12))throw Error('金額・数値が範囲外です。');if(v&&typeof v==='object')for(const [k,x]of Object.entries(v)){if(['__proto__','constructor','prototype'].includes(k))throw Error('不正なデータ構造です。');walk(x,k);}};walk(s);
  for(const k of collections){const ids=new Set();for(const x of s[k]){if(!x.id||ids.has(x.id))throw Error('IDが欠けているか重複しています。');ids.add(x.id);}}
- const dateFields=['date','balanceDate','startDate','endDate','dueDate','payDate','referenceDate'];
+ const dateFields=['date','balanceDate','startDate','endDate','dueDate','payDate','referenceDate','interestDate','nextDate'];
  const scan=(o)=>{for(const[k,v]of Object.entries(o)){if(dateFields.includes(k)&&v&&(!/^\d{4}-\d{2}-\d{2}$/.test(v)||Number.isNaN(day(v).getTime())||iso(day(v))!==v))throw Error('日付が不正です。');if(v&&typeof v==='object')scan(v);}};scan(s);
  for(const a of s.accounts)if(!Number.isSafeInteger(a.balance)||!a.balanceDate)throw Error('口座残高が不正です。');
  for(const t of s.transactions){if(!['expense','income','transfer','fee','refund','cancel','adjustment'].includes(t.kind)||!t.date||!Number.isSafeInteger(t.amount)||(t.kind!=='adjustment'&&t.amount<0))throw Error('取引が不正です。');if(t.accountId&&!s.accounts.some(a=>a.id===t.accountId))throw Error('取引の口座が見つかりません。');if(t.cardId&&!s.cards.some(c=>c.id===t.cardId))throw Error('取引のカードが見つかりません。');}
@@ -34,9 +34,11 @@ export function validateState(s){
  for(const e of s.employers){number(e,'hourly',0);number(e,'closeDay',1,31,true);number(e,'payDay',1,31,true);ref(e,'accountId','accounts');if(e.payOffset!==undefined)number(e,'payOffset',0,12,true);}
  for(const sh of [...s.shifts,...s.templates]){ref(sh,'employerId','employers');if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(sh.start)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(sh.end))throw Error('勤務時刻が不正です。');number(sh,'breakMinutes',0,1439,true);}
  for(const a of s.advances){ref(a,'employerId','employers');ref(a,'accountId','accounts');number(a,'amount',0,1e12,true);number(a,'fee',0,a.amount,true);if(!a.date||!a.payDate||a.date>a.payDate)throw Error('先払いは受取日以降の給料日を指定してください。');}
- for(const d of s.debts){ref(d,'accountId','accounts');number(d,'balance',0,1e12,true);number(d,'apr',0,100);number(d,'payment',1,1e12,true);number(d,'payDay',1,31,true);if(!d.startDate)throw Error('返済開始日を入力してください。');}
+ for(const d of s.debts){d.kind??='installment';if(!['installment','revolving'].includes(d.kind))throw Error('借入の種類が不正です。');if(d.kind==='revolving'){number(d,'limit',0,1e12,true);if(d.balance>d.limit)throw Error('借入残高が利用限度額を超えています。');if(!d.interestDate)throw Error('利息計算の基準日を入力してください。');number(d,'accruedInterest',0);if(typeof d.allowDraw!=='boolean')throw Error('追加借入の可否が不正です。');}ref(d,'accountId','accounts');number(d,'balance',0,1e12,true);number(d,'apr',0,100);number(d,'payment',1,1e12,true);number(d,'payDay',1,31,true);if(!d.startDate)throw Error('返済開始日を入力してください。');}
  for(const t of s.transactions)if(t.debtSettlement){const v=t.debtSettlement;ref(v,'debtId','debts');number(v,'principal',1,1e12,true);number(v,'extra',0,1e12,true);number(v,'previousBalance',v.principal,1e12,true);if(t.amount!==v.principal+v.extra)throw Error('一括返済の内訳が不正です。');}
  for(const d of s.debts)if(d.settlementId){const t=s.transactions.find(t=>t.id===d.settlementId);if(d.balance!==0||!t||t.kind!=='expense'||t.status!=='actual'||t.debtSettlement?.debtId!==d.id||s.transactions.some(x=>x.reverses===t.id))throw Error('一括返済済みの借入が不正です。');}
+ for(const t of s.transactions)if(t.debtOperationId){ref(t,'debtId','debts');if(!['draw','principal','interest','fee'].includes(t.debtComponent)||t.status!=='actual'||t.cardId)throw Error('借入取引が不正です。');const owner=s.transactions.find(x=>x.debtOperation?.id===t.debtOperationId);if(!owner||owner.debtId!==t.debtId)throw Error('借入取引の関連付けが不正です。');}
+ for(const t of s.transactions)if(t.debtOperation){const o=t.debtOperation;number(o,'total',1,1e12,true);number(o,'interest',0,1e12,true);number(o,'fee',0,1e12,true);const members=s.transactions.filter(x=>x.debtOperationId===o.id);if(members.reduce((sum,x)=>sum+x.amount,0)!==o.total+(o.kind==='draw'?o.fee:0)||!o.before||!o.after)throw Error('借入取引の内訳が不正です。');}
  for(const c of s.categories)number(c,'budget',0,1e12,true);
  if(!s.settings.confidence)throw Error('信用度設定がありません。');
  for(const k of ['minimum','buffer','dailySpecial'])number(s.settings,k,0,1e12,true);number(s.settings,'salaryDay',1,31,true);
@@ -76,7 +78,7 @@ export function generateEvents(s,asOf=today(),horizon=addDays(asOf,90)){
  for(const g of payroll(s))add({...g,amount:g.amount,confidence:g.amount?g.trusted/g.amount*100:100,status:'planned'});
  for(const a of s.advances)if(!(a.active===false&&a.status==='planned'))add({id:`advance:${a.id}`,source:'advance',name:'給与先払い（手数料差引後）',date:a.date,amount:Number(a.amount)-Number(a.fee||0),accountId:a.accountId,status:a.status||'actual',confidence:100});
  for(const g of s.goals)if(g.active!==false)add({id:`goal:${g.id}`,source:'longterm',name:g.name,date:g.dueDate,amount:-Number(g.amount),accountId:g.accountId,status:'planned'});
- for(const d of s.debts){if(d.active===false)continue;let balance=Number(d.balance),i=0;while(balance>0){const date=monthDate(d.startDate,i,Number(d.payDay));if(date>horizon||i>=1200)break;const key=`debt:${d.id}:${date}`,o=replacement.get(key);const interest=round(balance*Number(d.apr||0)/1200,d.rounding);const reversed=s.transactions.some(t=>t.reversesEvent===key);const amount=o?.skipped||reversed?0:Math.min(balance+interest,o?.amount!==undefined?-Number(o.amount):Number(d.payment));const principal=amount-interest;add({id:key,source:'debt',date,name:d.name,amount:-amount,interest,remaining:balance-principal,accountId:d.accountId,status:'planned'});if(principal<=0&&!o?.skipped){warnings.push(`${d.name}：返済額が利息以下のため元金が減りません。`);}balance-=principal;i++;if(d.months&&i>=d.months&&balance>0){warnings.push(`${d.name}：返済期間末に残る${money(balance)}を仮確保しています。実際の最終返済条件を確認してください。`);add({id:`debt-residual:${d.id}:${date}`,source:'debt',date,name:`${d.name} 残債の仮確保`,amount:-balance,accountId:d.accountId,status:'planned',interest:0,remaining:0});break;}}}
+ for(const d of s.debts){if(d.active===false)continue;if(d.kind==='revolving'){const prediction=predictRevolving(s,d,horizon);for(const e of prediction.events)add(e);warnings.push(...prediction.warnings);continue;}let balance=Number(d.balance),i=0;while(balance>0){const date=monthDate(d.startDate,i,Number(d.payDay));if(date>horizon||i>=1200)break;const key=`debt:${d.id}:${date}`,o=replacement.get(key);const interest=round(balance*Number(d.apr||0)/1200,d.rounding);const reversed=s.transactions.some(t=>t.reversesEvent===key);const amount=o?.skipped||reversed?0:Math.min(balance+interest,o?.amount!==undefined?-Number(o.amount):Number(d.payment));const principal=amount-interest;add({id:key,source:'debt',date,name:d.name,amount:-amount,interest,remaining:balance-principal,accountId:d.accountId,status:'planned'});if(principal<=0&&!o?.skipped){warnings.push(`${d.name}：返済額が利息以下のため元金が減りません。`);}balance-=principal;i++;if(d.months&&i>=d.months&&balance>0){warnings.push(`${d.name}：返済期間末に残る${money(balance)}を仮確保しています。実際の最終返済条件を確認してください。`);add({id:`debt-residual:${d.id}:${date}`,source:'debt',date,name:`${d.name} 残債の仮確保`,amount:-balance,accountId:d.accountId,status:'planned',interest:0,remaining:0});break;}}}
  // Apply bill overrides after aggregation, so a manually confirmed bill replaces all generated lines.
  for(const o of s.overrides)if(o.status==='actual'&&o.snapshot?.cardPurchase&&!events.some(e=>e.id===o.sourceId))events.push({...o.snapshot,...o,id:o.sourceId});
  const purchases=events.filter(e=>e.cardPurchase),bills=new Map();
@@ -131,10 +133,12 @@ export function calculate(s,asOf=today()){
 }
 export function budgetPeriod(s,date=today()){const n=s.settings.salaryDay;const start=monthDate(date,date<monthDate(date,0,n)?-1:0,n);return {start,end:addDays(monthDate(start,1,n),-1)};}
 export function budgets(s,date=today()){
- const {start,end}=budgetPeriod(s,date),generated=generateEvents(s,date,date).events;return s.categories.map(c=>{let used=0;for(const t of s.transactions){if(t.status!=='actual'||t.date<start||t.date>end||t.categoryId!==c.id)continue;if(['expense','fee'].includes(t.kind))used+=t.amount;if(['refund','cancel'].includes(t.kind))used-=t.amount;if(t.kind==='transfer')used+=Number(t.fee||0);}for(const e of generated){if(e.transactionId||e.status!=='actual'||e.date<start||e.date>end||e.categoryId!==c.id||e.reserveRelease!==undefined)continue;used+=e.cardPurchase?e.amount:-Math.min(e.amount,0);}return {...c,used,remaining:Number(c.budget||0)-used};});
+ const {start,end}=budgetPeriod(s,date),generated=generateEvents(s,date,date).events;return s.categories.map(c=>{let used=0;for(const t of s.transactions){if(t.status!=='actual'||t.date<start||t.date>end||t.categoryId!==c.id)continue;if(['expense','fee'].includes(t.kind)&&!['draw','principal'].includes(t.debtComponent))used+=t.amount;if(['refund','cancel'].includes(t.kind)&&!['draw','principal'].includes(t.debtComponent))used-=t.amount;if(t.kind==='transfer')used+=Number(t.fee||0);}for(const e of generated){if(e.transactionId||e.status!=='actual'||e.date<start||e.date>end||e.categoryId!==c.id||e.reserveRelease!==undefined)continue;used+=e.cardPurchase?e.amount:-Math.min(e.amount,0);}return {...c,used,remaining:Number(c.budget||0)-used};});
 }
 export function cancelTransaction(s,transactionId,date=today()){
  const t=s.transactions.find(t=>t.id===transactionId);if(!t)throw Error('取引が見つかりません。');
+ if(t.reverses&&(t.debtId||t.debtSettlement))throw Error('借入の取消記録は再取消できません。必要な借入・返済を新しく記録してください。');
+ if(t.debtOperationId&&!t.reverses){cancelDebtActivity(s,t.debtOperationId,date);return;}
  if(t.status==='planned'){s.transactions=s.transactions.filter(x=>x.id!==t.id);return;}
  if(s.transactions.some(x=>x.reverses===t.id))throw Error('すでに取消済みです。');
  if(t.debtSettlement&&!t.reverses){const d=s.debts.find(d=>d.id===t.debtSettlement.debtId);if(!d||d.settlementId!==t.id||d.balance!==0)throw Error('返済後に借入が変更されています。借入の内容を確認してください。');d.balance=t.debtSettlement.previousBalance;delete d.settlementId;}
@@ -155,6 +159,7 @@ export function cancelGeneratedEvent(s,e,date=today()){
 /** Remaining principal counts confirmed repayments only, never unpaid forecasts. */
 export function debtRemaining(s,debtId,date=today()){
  const d=s.debts.find(d=>d.id===debtId);if(!d)throw Error('借入が見つかりません。');
+ if(d.kind==='revolving')return d.balance;
  if(d.settlementId)return 0;
  const paid=s.overrides.filter(o=>o.status==='actual'&&o.snapshot?.source==='debt'&&o.sourceId.startsWith(`debt:${d.id}:`)&&o.snapshot.date<=date&&!s.transactions.some(t=>t.reversesEvent===o.sourceId&&t.date<=date));
  return Math.max(0,d.balance-paid.reduce((sum,o)=>sum+Math.max(0,-Number(o.amount??o.snapshot.amount)-Number(o.snapshot.interest||0)),0));
@@ -163,6 +168,7 @@ export function debtRemaining(s,debtId,date=today()){
 /** Record one cash expense and close its debt together. Actual history remains frozen. */
 export function settleDebt(s,debtId,{amount,date,accountId,categoryId='',memo=''},asOf=today()){
  const d=s.debts.find(d=>d.id===debtId);if(!d)throw Error('借入が見つかりません。');
+ if(d.kind==='revolving')return recordDebtActivity(s,debtId,{kind:'repayment',amount,interest:amount-d.balance,fee:0,date,accountId,categoryId,memo,nextDate:monthDate(date,1,d.payDay)},asOf);
  if(!date||!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(day(date).getTime())||iso(day(date))!==date||date>asOf)throw Error('返済日は今日以前の有効な日付にしてください。');
  const account=s.accounts.find(a=>a.id===accountId&&a.active!==false);if(!account)throw Error('返済元の口座を選択してください。');
  if(date<account.balanceDate)throw Error('口座の開始日より前の返済は記録できません。');
@@ -180,4 +186,45 @@ export function resolvePayment(s,payment){
  const entity=(type==='a'?s.accounts:type==='c'?s.cards:type==='d'?s.debitCards:[]).find(x=>x.id===key);
  if(!entity)throw Error('支払方法を選択してください。');
  return {accountId:type==='a'?key:entity.accountId,cardId:type==='c'?key:'',debitCardId:type==='d'?key:''};
+}
+
+/** Revolving debt estimates simple daily interest; actual lender figures take priority. */
+export function debtInterest(d,date=today()){
+ return round(Number(d.accruedInterest||0)+d.balance*Number(d.apr||0)/100*Math.max(0,days(d.interestDate,date))/365,d.rounding);
+}
+export function debtAvailable(d){return d.kind==='revolving'?Math.max(0,d.limit-d.balance):0;}
+function predictRevolving(s,d,horizon){
+ const events=[],warnings=[];let balance=d.balance,accrued=Number(d.accruedInterest||0),base=d.interestDate,index=0;
+ while(balance>0&&index<1200){const date=monthDate(d.startDate,index++,d.payDay);if(date>horizon)break;const key=`debt:${d.id}:${date}`,o=s.overrides.find(o=>o.sourceId===key),elapsed=Math.max(0,days(base,date));accrued+=balance*d.apr/100*elapsed/365;base=date>base?date:base;const interest=round(accrued,d.rounding),amount=o?.skipped?0:Math.min(balance+interest,o?.amount!==undefined?-o.amount:d.payment),interestPaid=Math.min(amount,interest),principal=Math.max(0,amount-interestPaid);balance-=principal;accrued=Math.max(0,accrued-interestPaid);events.push({id:key,source:'debt',debtId:d.id,name:`${d.name} 返済`,date,amount:-amount,interest:interestPaid,remaining:balance,accountId:d.accountId,status:'planned'});if(principal<=0&&!o?.skipped)warnings.push(`${d.name}：返済額が利息以下のため元金が減りません。`);
+ }
+ return {events,warnings};
+}
+const debtFields=['balance','interestDate','accruedInterest','startDate','payDay','lastOperationId'];
+function debtSnapshot(d){return Object.fromEntries(debtFields.map(k=>[k,d[k]??null]));}
+export function recordDebtActivity(s,debtId,{kind,amount,interest=0,fee=0,date,accountId,categoryId='',memo='',nextDate,full=false},asOf=today()){
+ const d=s.debts.find(d=>d.id===debtId);if(!d||d.kind!=='revolving'||d.active===false)throw Error('有効な残高型借入を選択してください。');
+ const validDate=v=>typeof v==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(v)&&!Number.isNaN(day(v).getTime())&&iso(day(v))===v;
+ if(!validDate(date)||date>asOf||date<d.interestDate)throw Error('日付は利息基準日以降、今日以前にしてください。');
+ const account=s.accounts.find(a=>a.id===accountId&&a.active!==false);if(!account||date<account.balanceDate)throw Error('有効な口座と、その開始日以降の日付を指定してください。');
+ for(const value of [amount,interest,fee])if(!Number.isSafeInteger(value)||value<0||value>1e12)throw Error('金額は0以上の1円単位で入力してください。');
+ if(amount<=0||!['draw','repayment'].includes(kind)||kind==='draw'&&interest!==0)throw Error('借入・返済額を入力してください。');
+ if(kind==='draw'&&(!d.allowDraw||amount>debtAvailable(d)||fee>amount))throw Error('追加借入が許可されていないか、利用可能額を超えています。');
+ const principal=kind==='repayment'?amount-interest-fee:amount;
+ if(full&&kind==='repayment'&&principal!==d.balance)throw Error('一括返済の元金が現在残高と一致しません。支払総額と利息・手数料を確認してください。');
+ if(principal<0||kind==='repayment'&&(principal>d.balance||d.balance<=0))throw Error('返済元金・利息・手数料の内訳を確認してください。');
+ if(kind==='repayment'&&(!validDate(nextDate)||nextDate<=date))throw Error('次回返済日は今回の返済日より後にしてください。');
+ const before=debtSnapshot(d),operationId=id(),entries=[];
+ const entry=(component,value,txKind,label)=>({id:id(),kind:txKind,status:'actual',name:`${d.name}：${label}`,amount:value,date,accountId,categoryId,memo,confidence:100,source:'debt',debtId,debtComponent:component,debtOperationId:operationId});
+ if(kind==='draw'){entries.push(entry('draw',amount,'income','追加借入'));if(fee)entries.push(entry('fee',fee,'fee','借入手数料'));d.accruedInterest=Number(d.accruedInterest||0)+d.balance*d.apr/100*days(d.interestDate,date)/365;d.balance+=amount;}
+ else {entries.push(entry('principal',principal,'expense','返済（元金）'));if(interest)entries.push(entry('interest',interest,'fee','利息'));if(fee)entries.push(entry('fee',fee,'fee','返済手数料'));d.balance-=principal;d.accruedInterest=0;d.startDate=nextDate;d.payDay=Number(nextDate.slice(8));}
+ d.interestDate=date;d.lastOperationId=operationId;const after=debtSnapshot(d);entries[0].debtOperation={id:operationId,kind,before,after,total:amount,interest,fee};s.transactions.push(...entries);return entries[0];
+}
+export function cancelDebtActivity(s,operationId,date=today()){
+ const original=s.transactions.find(t=>t.debtOperation?.id===operationId);if(!original)throw Error('借入・返済の記録が見つかりません。');
+ const members=s.transactions.filter(t=>t.debtOperationId===operationId&&!t.reverses),d=s.debts.find(d=>d.id===original.debtId);
+ if(s.transactions.some(t=>members.some(m=>t.reverses===m.id)))throw Error('すでに取消済みです。');
+ if(!d||d.lastOperationId!==operationId||JSON.stringify(debtSnapshot(d))!==JSON.stringify(original.debtOperation.after))throw Error('後の借入・返済または編集があります。新しい記録から順に取り消してください。');
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(day(date).getTime())||iso(day(date))!==date||date<original.date||date>today())throw Error('取消日は元の記録以降、今日以前にしてください。');
+ for(const field of debtFields){const v=original.debtOperation.before[field];if(v===null)delete d[field];else d[field]=v;}
+ for(const t of members){const reverse={...t,id:id(),date,kind:t.kind==='income'?'expense':'refund',name:`取消：${t.name}`,reverses:t.id};delete reverse.debtOperation;delete reverse.debtOperationId;s.transactions.push(reverse);}
 }
