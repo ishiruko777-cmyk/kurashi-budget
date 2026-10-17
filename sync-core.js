@@ -16,6 +16,15 @@ export function mergeStates(base,local,remote){
   conflicts.push(path);return l;
  }
  const state=merge(base,local,remote,'data');
+ // Two independent override IDs must not hide two actual payments behind one recurrence.
+ if(Array.isArray(state.transactions)){
+  const activeLinks=new Map();
+  for(const t of state.transactions)if(t.recurringSourceId&&!t.reverses&&!state.transactions.some(x=>x.reverses===t.id)){
+   const previous=activeLinks.get(t.recurringSourceId);
+   if(previous&&previous!==t.id)conflicts.push('data.recurringLinks.'+t.recurringSourceId);
+   activeLinks.set(t.recurringSourceId,t.id);
+  }
+ }
  return {state,conflicts};
 }
 export function hasHouseholdData(s){return s.setupDone||s.accounts.length>0||s.transactions.length>0;}

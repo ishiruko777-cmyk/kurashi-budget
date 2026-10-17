@@ -31,7 +31,7 @@ export function validateState(s){
  for(const c of s.cards){number(c,'closeDay',1,31,true);number(c,'payDay',1,31,true);if(c.payOffset!==undefined){number(c,'payOffset',0,12,true);if(c.payOffset===0&&c.payDay<c.closeDay)throw Error('締め日より前の支払日は翌月以降を選択してください。');}if(c.openingOutstanding!==undefined)number(c,'openingOutstanding',0,1e12,true);}
  for(const r of s.recurring){number(r,'amount',0,1e12,true);ref(r,'accountId','accounts');if(!r.startDate||!['daily','weekly','monthly','yearly'].includes(r.cycle))throw Error('定期ルールが不正です。');if(r.endDate&&r.endDate<r.startDate)throw Error('終了日は開始日以降です。');if(r.payDay!==undefined)number(r,'payDay',1,31,true);}
  for(const g of s.goals){number(g,'amount',0,1e12,true);ref(g,'accountId','accounts');if(!g.dueDate)throw Error('期限が未設定です。');}
- for(const e of s.employers){number(e,'hourly',0);number(e,'closeDay',1,31,true);number(e,'payDay',1,31,true);ref(e,'accountId','accounts');if(e.payOffset!==undefined)number(e,'payOffset',0,12,true);}
+ for(const e of s.employers){if(e.fixedDeduction!==undefined)number(e,'fixedDeduction',0,1e12,true);number(e,'hourly',0);number(e,'closeDay',1,31,true);number(e,'payDay',1,31,true);ref(e,'accountId','accounts');if(e.payOffset!==undefined)number(e,'payOffset',0,12,true);}
  for(const sh of [...s.shifts,...s.templates]){ref(sh,'employerId','employers');if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(sh.start)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(sh.end))throw Error('勤務時刻が不正です。');number(sh,'breakMinutes',0,1439,true);}
  for(const a of s.advances){ref(a,'employerId','employers');ref(a,'accountId','accounts');number(a,'amount',0,1e12,true);number(a,'fee',0,a.amount,true);if(!a.date||!a.payDate||a.date>a.payDate)throw Error('先払いは受取日以降の給料日を指定してください。');}
  for(const d of s.debts){d.kind??='installment';if(!['installment','revolving'].includes(d.kind))throw Error('借入の種類が不正です。');if(d.kind==='revolving'){number(d,'limit',0,1e12,true);if(d.balance>d.limit)throw Error('借入残高が利用限度額を超えています。');if(!d.interestDate)throw Error('利息計算の基準日を入力してください。');number(d,'accruedInterest',0);if(typeof d.allowDraw!=='boolean')throw Error('追加借入の可否が不正です。');}ref(d,'accountId','accounts');number(d,'balance',0,1e12,true);number(d,'apr',0,100);number(d,'payment',1,1e12,true);number(d,'payDay',1,31,true);if(!d.startDate)throw Error('返済開始日を入力してください。');}
@@ -44,6 +44,10 @@ export function validateState(s){
  for(const k of ['minimum','buffer','dailySpecial'])number(s.settings,k,0,1e12,true);number(s.settings,'salaryDay',1,31,true);
  for(const v of Object.values(s.settings.confidence||{}))if(v<0||v>100)throw Error('信用度は0〜100%です。');
  if(s.settings.minimum<0||s.settings.buffer<0)throw Error('確保額は0円以上です。');
+ const liveSources=new Set();
+ for(const t of s.transactions)if(t.recurringSourceId&&!t.reverses){const e=t.recurringSnapshot;if(typeof t.recurringSourceId!=='string'||!t.recurringSourceId.startsWith('recurring:')||!e||e.id!==t.recurringSourceId||t.kind!=='expense'||t.status!=='actual'||t.debtId||t.debtSettlement||t.reserveCardId||!matchingRecurringPayment(s,t,e,true))throw Error('定期支出と実績の紐付けが不正です。');if(!s.transactions.some(x=>x.reverses===t.id)){const o=s.overrides.find(o=>o.sourceId===t.recurringSourceId);if(liveSources.has(t.recurringSourceId)||o?.linkedTransactionId!==t.id||o.status==='actual'||o.accounted||o.skipped)throw Error('定期支出の紐付けが重複または競合しています。');liveSources.add(t.recurringSourceId);}}
+ for(const o of s.overrides)if(o.linkedSnapshot){const e=o.linkedSnapshot;if(typeof o.sourceId!=='string'||!o.sourceId.startsWith('recurring:')||e.id!==o.sourceId||!Number.isSafeInteger(e.amount)||!e.date||!s.accounts.some(a=>a.id===e.accountId)||e.status!=='planned'||e.transactionId||e.reserveRelease!==undefined||(e.cardPurchase?(!e.cardId||e.amount<=0):e.amount>=0))throw Error('紐付けた定期予定の保存情報が不正です。');}
+ for(const o of s.overrides)if(o.linkedTransactionId){const t=s.transactions.find(t=>t.id===o.linkedTransactionId);if(!t||t.recurringSourceId!==o.sourceId||!o.linkedSnapshot||o.linkedSnapshot.id!==o.sourceId||!matchingRecurringPayment(s,t,o.linkedSnapshot,true))throw Error('定期支出の紐付け先が見つかりません。');}
  for(const o of s.overrides){if(o.accounted!==undefined&&typeof o.accounted!=='boolean')throw Error('反映済みの確認状態が不正です。');if(o.accounted===true){const e=o.accountedSnapshot;if(!e||typeof o.sourceId!=='string'||typeof o.accountedOn!=='string'||typeof e.date!=='string'||!Number.isSafeInteger(e.amount)||e.id!==o.sourceId||!o.sourceId.startsWith('recurring:')||e.transactionId||e.cardId||e.cardPurchase||e.reserveRelease!==undefined||e.status!=='planned'||e.amount>=0||!e.date||!o.accountedOn||e.date>=o.accountedOn||o.status==='actual'||!s.accounts.some(a=>a.id===e.accountId))throw Error('残高に反映済みの確認情報が不正です。');}}
  return s;
 }
@@ -61,8 +65,17 @@ export function shiftPay(shift,e){
 }
 export function payroll(s){
  const groups=new Map();
- for(const shift of s.shifts){const e=s.employers.find(x=>x.id===shift.employerId);if(!e||shift.active===false)continue;const date=payrollDate(shift.date,e),key=`salary:${e.id}:${date}`;let g=groups.get(key);if(!g){g={id:key,source:'salary',name:`${e.name} 給与`,date,accountId:e.accountId,amount:0,trusted:0,worked:0,employerId:e.id};groups.set(key,g);}const p=shiftPay(shift,e);g.amount+=p.net;g.trusted+=p.net*Number(s.settings.confidence[shift.status]??0)/100;if(shift.status==='worked')g.worked+=p.net;}
- for(const g of groups.values()){const e=s.employers.find(x=>x.id===g.employerId);const fixed=round(Number(e.allowance||0)*(1-(e.deduct?Number(e.deductionRate||0)/100:0)));g.amount+=fixed;g.trusted+=fixed*(g.amount>fixed?(g.trusted/(g.amount-fixed)):0);const taken=s.advances.filter(a=>a.employerId===g.employerId&&a.payDate===g.date&&!(a.active===false&&a.status==='planned')&&!s.transactions.some(t=>t.reversesEvent===`advance:${a.id}`)&&!s.overrides.some(o=>o.sourceId===`advance:${a.id}`&&o.skipped)).reduce((n,a)=>n+Number(a.amount),0);g.amount=Math.max(0,g.amount-taken);g.trusted=Math.max(0,round(g.trusted)-taken);g.advanceAvailable=Math.max(0,Math.min(round(g.worked*Number(e.advancePercent||0)/100),Number(e.advanceCap||1e12))-taken);}
+ for(const shift of s.shifts){const e=s.employers.find(x=>x.id===shift.employerId);if(!e||shift.active===false)continue;const date=payrollDate(shift.date,e),key=`salary:${e.id}:${date}`;let g=groups.get(key);if(!g){g={gross:0,id:key,source:'salary',name:`${e.name} 給与`,date,accountId:e.accountId,amount:0,trusted:0,worked:0,employerId:e.id};groups.set(key,g);}const p=shiftPay(shift,e);g.gross+=p.gross;g.amount+=p.net;g.trusted+=p.net*Number(s.settings.confidence[shift.status]??0)/100;if(shift.status==='worked')g.worked+=p.net;}
+ for(const g of groups.values()){
+  const e=s.employers.find(x=>x.id===g.employerId),allowance=Number(e.allowance||0),fixedAllowance=round(allowance*(1-(e.deduct?Number(e.deductionRate||0)/100:0)));
+  g.amount+=fixedAllowance;g.trusted+=fixedAllowance*(g.amount>fixedAllowance?(g.trusted/(g.amount-fixedAllowance)):0);g.gross+=round(allowance);
+  g.percentageDeduction=Math.max(0,g.gross-g.amount);g.fixedDeduction=e.deduct?Number(e.fixedDeduction||0):0;g.deductionExcess=Math.max(0,g.fixedDeduction-g.amount);
+  const preFixed=g.amount;g.beforeAdvanceAmount=Math.max(0,preFixed-g.fixedDeduction);g.trustedBeforeAdvance=Math.max(0,round(g.trusted)-g.fixedDeduction);
+  const taken=s.advances.filter(a=>a.employerId===g.employerId&&a.payDate===g.date&&!(a.active===false&&a.status==='planned')&&!s.transactions.some(t=>t.reversesEvent===`advance:${a.id}`)&&!s.overrides.some(o=>o.sourceId===`advance:${a.id}`&&o.skipped)).reduce((n,a)=>n+Number(a.amount),0);
+  g.advanceTaken=taken;g.amount=Math.max(0,g.beforeAdvanceAmount-taken);g.trusted=Math.max(0,g.trustedBeforeAdvance-taken);
+  g.advanceAvailable=g.fixedDeduction>0?Math.max(0,Math.min(round(Math.max(0,g.worked-g.fixedDeduction)*Number(e.advancePercent||0)/100),Number(e.advanceCap||1e12),g.beforeAdvanceAmount)-taken):Math.max(0,Math.min(round(g.worked*Number(e.advancePercent||0)/100),Number(e.advanceCap||1e12))-taken);
+ }
+
  return [...groups.values()];
 }
 function txEvent(t,s){
@@ -73,10 +86,10 @@ function txEvent(t,s){
 }
 export function generateEvents(s,asOf=today(),horizon=addDays(asOf,90)){
  const events=[],warnings=[];const replacement=new Map(s.overrides.map(o=>[o.sourceId,o]));
- const add=e=>{const o=replacement.get(e.id);if(o?.skipped||o?.accounted===true)return;if(o){const {accounted,accountedOn,accountedSnapshot,sourceId,...effective}=o;e={...e,...(o.status==='actual'?o.snapshot:{}),...effective,id:e.id};}events.push(e);};
+ const add=e=>{const o=replacement.get(e.id);if(o?.skipped||o?.accounted===true||isLiveRecurringLink(s,o))return;if(o){if(o.linkedSnapshot&&!isLiveRecurringLink(s,o))e={...o.linkedSnapshot,status:'planned',id:e.id};const {accounted,accountedOn,accountedSnapshot,sourceId,linkedTransactionId,linkedSnapshot,...effective}=o;e={...e,...(o.status==='actual'?o.snapshot:{}),...effective,id:e.id};}events.push(e);};
  for(const t of s.transactions){const e=txEvent(t,s);if(e)add(e);}
  for(const r of s.recurring){if(r.active===false)continue;let date=r.startDate,index=0;while(date<=horizon&&(!r.endDate||date<=r.endDate)){const raw={id:`recurring:${r.id}:${date}`,date,name:r.name,amount:Number(r.amount),kind:r.kind||'expense',accountId:r.debitCardId?s.debitCards.find(c=>c.id===r.debitCardId)?.accountId:r.accountId,cardId:r.cardId,debitCardId:r.debitCardId,status:'planned',categoryId:r.categoryId,confidence:r.confidence??100,source:r.group||'fixed'};const e=txEvent(raw,s);if(e){delete e.transactionId;add(e);}if(++index>20000){warnings.push('定期予定が多すぎるため、開始日を確認してください。');break;}date=r.cycle==='weekly'?addDays(r.startDate,index*7):r.cycle==='daily'?addDays(r.startDate,index):monthDate(r.startDate,index*(r.cycle==='yearly'?12:1),Number(r.payDay||Number(r.startDate.slice(8))));}}
- for(const g of payroll(s))add({...g,amount:g.amount,confidence:g.amount?g.trusted/g.amount*100:100,status:'planned'});
+ for(const g of payroll(s)){add({...g,amount:g.amount,confidence:g.amount?g.trusted/g.amount*100:100,status:'planned'});const o=replacement.get(g.id);if(g.date>=asOf&&g.deductionExcess>0&&o?.amount===undefined&&o?.status!=='actual')warnings.push(`${g.name}：控除が支給額を ${money(g.deductionExcess)} 上回っています。給与設定か実額を確認してください。`);}
  for(const a of s.advances)if(!(a.active===false&&a.status==='planned'))add({id:`advance:${a.id}`,source:'advance',name:'給与先払い（手数料差引後）',date:a.date,amount:Number(a.amount)-Number(a.fee||0),accountId:a.accountId,status:a.status||'actual',confidence:100});
  for(const g of s.goals)if(g.active!==false)add({id:`goal:${g.id}`,source:'longterm',name:g.name,date:g.dueDate,amount:-Number(g.amount),accountId:g.accountId,status:'planned'});
  for(const d of s.debts){if(d.active===false)continue;if(d.kind==='revolving'){const prediction=predictRevolving(s,d,horizon);for(const e of prediction.events)add(e);warnings.push(...prediction.warnings);continue;}let balance=Number(d.balance),i=0;while(balance>0){const date=monthDate(d.startDate,i,Number(d.payDay));if(date>horizon||i>=1200)break;const key=`debt:${d.id}:${date}`,o=replacement.get(key);const interest=round(balance*Number(d.apr||0)/1200,d.rounding);const reversed=s.transactions.some(t=>t.reversesEvent===key);const amount=o?.skipped||reversed?0:Math.min(balance+interest,o?.amount!==undefined?-Number(o.amount):Number(d.payment));const principal=amount-interest;add({id:key,source:'debt',date,name:d.name,amount:-amount,interest,remaining:balance-principal,accountId:d.accountId,status:'planned'});if(principal<=0&&!o?.skipped){warnings.push(`${d.name}：返済額が利息以下のため元金が減りません。`);}balance-=principal;i++;if(d.months&&i>=d.months&&balance>0){warnings.push(`${d.name}：返済期間末に残る${money(balance)}を仮確保しています。実際の最終返済条件を確認してください。`);add({id:`debt-residual:${d.id}:${date}`,source:'debt',date,name:`${d.name} 残債の仮確保`,amount:-balance,accountId:d.accountId,status:'planned',interest:0,remaining:0});break;}}}
@@ -86,6 +99,8 @@ export function generateEvents(s,asOf=today(),horizon=addDays(asOf,90)){
  for(const c of s.cards){if(Number(c.openingOutstanding)>0){const p={id:`opening-card:${c.id}`,name:c.name,date:c.balanceDate||asOf,amount:Number(c.openingOutstanding),cardId:c.id,accountId:c.accountId,cardPurchase:true,dueDate:c.openingDueDate||cardDue(asOf,c),status:'actual',source:'card'};events.push(p);purchases.push(p);}}
  for(const p of purchases){const key=`bill:${p.cardId}:${p.dueDate}`;let b=bills.get(key);if(!b){const c=s.cards.find(x=>x.id===p.cardId);b={id:key,name:`${c.name} 引落`,source:'card',date:p.dueDate,amount:0,reserveRelease:0,accountId:p.accountId,cardId:p.cardId,status:'planned'};bills.set(key,b);}b.amount-=p.amount;b.reserveRelease+=p.amount;}
  for(const b of bills.values())add(b);
+ // A cancelled or explicitly detached link restores just its original pending obligation.
+ for(const o of s.overrides)if(o.linkedSnapshot&&!isLiveRecurringLink(s,o)&&o.status!=='actual'&&!o.skipped&&!o.accounted&&!events.some(e=>e.id===o.sourceId))add({...o.linkedSnapshot,status:'planned',id:o.sourceId});
  // Confirmed automatic postings survive archiving or editing their source rule.
  for(const o of s.overrides)if(o.status==='actual'&&o.snapshot&&!events.some(e=>e.id===o.sourceId))events.push({...o.snapshot,...o,id:o.sourceId});
  return {events,warnings:[...new Set(warnings)]};
@@ -131,7 +146,7 @@ export function calculate(s,asOf=today()){
  const source=s.settings.savingsSource||active.find(a=>included.has(a.id))?.id;
  const overdue=pending.filter(e=>!e.cardPurchase&&e.date<asOf);
  const limitingPoint=points.find(p=>p.date===limitingDate&&p.available===minimum)||points[0],firstFloorBreach=points.find(p=>p.available<0)||null;
- return {asOf,end,shortEnd,assets,current,minimum,safe,shortSafe:Math.max(0,shortMinimum),longReserve,limitingDate,limitingPoint,firstFloorBreach,income,expense,floor,reservedNow:points[0].reserved,points,events:pending.filter(e=>!e.cardPurchase).sort((a,b)=>a.date.localeCompare(b.date)),allEvents:events,shortfalls,warnings,overdue,savings,savingsSource:source,savable:savings[source]||0,daily:round(Math.max(0,safe-Number(s.settings.dailySpecial||0))/dayCount),dayCount,reference};
+ return {asOf,end,shortEnd,assets,current,minimum,safe,shortSafe:Math.max(0,shortMinimum),longReserve,limitingDate,limitingPoint,firstFloorBreach,salaryCoverage:salaryCoverage(s,events,asOf,shortEnd),income,expense,floor,reservedNow:points[0].reserved,points,events:pending.filter(e=>!e.cardPurchase).sort((a,b)=>a.date.localeCompare(b.date)),allEvents:events,shortfalls,warnings,overdue,savings,savingsSource:source,savable:savings[source]||0,daily:round(Math.max(0,safe-Number(s.settings.dailySpecial||0))/dayCount),dayCount,reference};
 }
 
 /** Explicit acknowledgement, never an assumed payment and never a cash posting. */
@@ -245,4 +260,31 @@ export function cancelDebtActivity(s,operationId,date=today()){
  if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||Number.isNaN(day(date).getTime())||iso(day(date))!==date||date<original.date||date>today())throw Error('取消日は元の記録以降、今日以前にしてください。');
  for(const field of debtFields){const v=original.debtOperation.before[field];if(v===null)delete d[field];else d[field]=v;}
  for(const t of members){const reverse={...t,id:id(),date,kind:t.kind==='income'?'expense':'refund',name:`取消：${t.name}`,reverses:t.id};delete reverse.debtOperation;delete reverse.debtOperationId;s.transactions.push(reverse);}
+}
+
+function hasSettledBill(s,cardId,dueDate){const key=`bill:${cardId}:${dueDate}`;return s.overrides.some(o=>o.sourceId===key&&o.status==='actual')&&!s.transactions.some(t=>t.reversesEvent===key);}
+function isLiveRecurringLink(s,o){if(!o?.linkedTransactionId)return false;const t=s.transactions.find(t=>t.id===o.linkedTransactionId);if(!t||t.status!=='actual'||t.kind!=='expense')return false;if(!s.transactions.some(x=>x.reverses===t.id))return true;return !!t.cardId&&hasSettledBill(s,t.cardId,t.recurringSnapshot?.dueDate);}
+function matchingRecurringPayment(s,t,e,historical=false){const cash=txEvent(t,s);return !!cash&&Number.isSafeInteger(e.amount)&&e.id?.startsWith('recurring:')&&!e.transactionId&&e.status==='planned'&&e.date===t.date&&e.accountId===(historical?t.accountId:cash.accountId)&&(e.cardId||'')===(t.cardId||'')&&(e.debitCardId||'')===(t.debitCardId||'')&&(!t.cardId||(historical?(t.dueDate||e.dueDate):(t.dueDate||cardDue(t.date,s.cards.find(c=>c.id===t.cardId))))===e.dueDate)&&(e.cardPurchase?e.amount>0:e.amount<0)&&e.reserveRelease===undefined;}
+export function recurringLinkCandidates(s,t,asOf=today()){
+ if(!t||t.kind!=='expense'||t.status!=='actual'||t.reverses||t.debtId||t.debtSettlement||t.debtOperationId||t.reserveCardId||s.transactions.some(x=>x.reverses===t.id))return [];
+ return generateEvents(s,asOf,t.date>asOf?t.date:asOf).events.filter(e=>matchingRecurringPayment(s,t,e)&&(!e.cardId||!hasSettledBill(s,e.cardId,e.dueDate)));
+}
+export function linkRecurringExpense(s,transactionId,sourceId,{confirmed=false,expected=null}={},asOf=today()){
+ if(confirmed!==true)throw Error('同じ支払いであることを確認してください。');
+ const t=s.transactions.find(t=>t.id===transactionId);if(!t||t.recurringSourceId)throw Error('実績を選び直してください。紐付け済みの実績は重ねて使えません。');
+ const e=recurringLinkCandidates(s,t,asOf).find(e=>e.id===sourceId);if(!e||t.date>asOf)throw Error('同日・同じ支払方法の未確認の定期支出を選択してください。');
+ if(expected&&JSON.stringify(e)!==JSON.stringify(expected))throw Error('確認中に予定が変わりました。選び直してください。');
+ const o=s.overrides.find(o=>o.sourceId===sourceId);if(o?.linkedTransactionId&&!s.transactions.some(x=>x.reverses===o.linkedTransactionId))throw Error('この予定には既に実績が紐付いています。');
+ const snapshot=structuredClone(e);t.recurringSourceId=sourceId;t.recurringSnapshot=snapshot;
+ if(o)Object.assign(o,{linkedTransactionId:t.id,linkedSnapshot:snapshot});else s.overrides.push({id:id(),sourceId,linkedTransactionId:t.id,linkedSnapshot:snapshot});
+}
+export function unlinkRecurringExpense(s,transactionId){
+ const t=s.transactions.find(t=>t.id===transactionId),o=s.overrides.find(o=>o.linkedTransactionId===transactionId);if(!t?.recurringSourceId||!o)throw Error('紐付けが見つかりません。');delete o.linkedTransactionId;delete t.recurringSourceId;delete t.recurringSnapshot;
+}
+export function salaryCoverage(s,events,asOf=today(),horizon=addDays(asOf,90)){
+ return s.employers.filter(e=>e.active!==false).flatMap(e=>{const dates=events.filter(g=>g.source==='salary'&&g.employerId===e.id).map(g=>g.date).sort();const last=dates.at(-1)||null,next=last?monthDate(last,1,e.payDay):payrollDate(asOf,e);return next<=horizon?[{employerId:e.id,name:e.name,lastDate:last,missingFrom:next}]:[];});
+}
+/** Presentation only: never changes safe-money or transfer assumptions. */
+export function fundingPreparation(s,result,withinDays=7){
+ const until=addDays(result.asOf,withinDays);return result.shortfalls.map(w=>({...w,accountType:s.accounts.find(a=>a.id===w.accountId)?.type||'other',urgent:w.date<=until}));
 }
