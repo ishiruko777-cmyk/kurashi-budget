@@ -1,3 +1,4 @@
+import {splitInfo,validateSplitState} from './split.js?v=9b779995f8d0';
 /** Money is integer JPY. Dates are local calendar ISO strings; no UTC conversion of user dates. */
 export const id=()=>globalThis.crypto.randomUUID();
 export const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
@@ -20,7 +21,7 @@ export function validateState(s){
  const dateFields=['date','balanceDate','startDate','endDate','dueDate','payDate','referenceDate','interestDate','nextDate','accountedOn','forecastFrom'];
  const scan=(o)=>{for(const[k,v]of Object.entries(o)){if(dateFields.includes(k)&&v&&(!/^\d{4}-\d{2}-\d{2}$/.test(v)||Number.isNaN(day(v).getTime())||iso(day(v))!==v))throw Error('日付が不正です。');if(v&&typeof v==='object')scan(v);}};scan(s);
  for(const a of s.accounts)if(!Number.isSafeInteger(a.balance)||!a.balanceDate)throw Error('口座残高が不正です。');
- for(const t of s.transactions){if(!['expense','income','transfer','fee','refund','cancel','adjustment'].includes(t.kind)||!t.date||!Number.isSafeInteger(t.amount)||(t.kind!=='adjustment'&&t.amount<0))throw Error('取引が不正です。');if(t.accountId&&!s.accounts.some(a=>a.id===t.accountId))throw Error('取引の口座が見つかりません。');if(t.cardId&&!s.cards.some(c=>c.id===t.cardId))throw Error('取引のカードが見つかりません。');}
+ for(const t of s.transactions){if(!['expense','income','transfer','fee','refund','cancel','adjustment','reimbursement'].includes(t.kind)||!t.date||!Number.isSafeInteger(t.amount)||(t.kind!=='adjustment'&&t.amount<0))throw Error('取引が不正です。');if(t.accountId&&!s.accounts.some(a=>a.id===t.accountId))throw Error('取引の口座が見つかりません。');if(t.cardId&&!s.cards.some(c=>c.id===t.cardId))throw Error('取引のカードが見つかりません。');}
  for(const c of s.debitCards)if(!s.accounts.some(a=>a.id===c.accountId&&['bank','savings'].includes(a.type)))throw Error('デビットカードには銀行口座を指定してください。');
  for(const t of [...s.transactions,...s.recurring]){if(t.debitCardId&&(!s.debitCards.some(c=>c.id===t.debitCardId)||!s.accounts.some(a=>a.id===t.accountId)||t.cardId||['income','transfer'].includes(t.kind)))throw Error('デビットカードの支払方法が不正です。');}
  for(const c of s.cards)if(!s.accounts.some(a=>a.id===c.accountId))throw Error('カードの引落口座が見つかりません。');
@@ -51,6 +52,7 @@ export function validateState(s){
  for(const o of s.overrides)if(o.linkedSnapshot){const e=o.linkedSnapshot;if(typeof o.sourceId!=='string'||!o.sourceId.startsWith('recurring:')||e.id!==o.sourceId||!Number.isSafeInteger(e.amount)||!e.date||!s.accounts.some(a=>a.id===e.accountId)||e.status!=='planned'||e.transactionId||e.reserveRelease!==undefined||(e.cardPurchase?(!e.cardId||e.amount<=0):e.amount>=0))throw Error('紐付けた定期予定の保存情報が不正です。');}
  for(const o of s.overrides)if(o.linkedTransactionId){const t=s.transactions.find(t=>t.id===o.linkedTransactionId);if(!t||t.recurringSourceId!==o.sourceId||!o.linkedSnapshot||o.linkedSnapshot.id!==o.sourceId||!matchingRecurringPayment(s,t,o.linkedSnapshot,true))throw Error('定期支出の紐付け先が見つかりません。');}
  for(const o of s.overrides){if(o.accounted!==undefined&&typeof o.accounted!=='boolean')throw Error('反映済みの確認状態が不正です。');if(o.accounted===true){const e=o.accountedSnapshot;if(!e||typeof o.sourceId!=='string'||typeof o.accountedOn!=='string'||typeof e.date!=='string'||!Number.isSafeInteger(e.amount)||e.id!==o.sourceId||!o.sourceId.startsWith('recurring:')||e.transactionId||e.cardId||e.cardPurchase||e.reserveRelease!==undefined||e.status!=='planned'||e.amount>=0||!e.date||!o.accountedOn||e.date>=o.accountedOn||o.status==='actual'||!s.accounts.some(a=>a.id===e.accountId))throw Error('残高に反映済みの確認情報が不正です。');}}
+ validateSplitState(s,today());
  return s;
 }
 export function cardDue(date,c){const close=monthDate(date,0,c.closeDay);const cycle=date<=close?date:monthDate(date,1,1);return monthDate(cycle,Number(c.payOffset??1),c.payDay);}
@@ -81,10 +83,10 @@ export function payroll(s,asOf=today(),horizon=addDays(asOf,90)){
  return [...groups.values()];
 }
 function txEvent(t,s){
- const sign=['income','refund','cancel','adjustment'].includes(t.kind)?1:-1;
+ const sign=['income','refund','cancel','adjustment','reimbursement'].includes(t.kind)?1:-1;
  if(t.cardId){const c=s.cards.find(x=>x.id===t.cardId);if(!c)return null;return {id:t.id,source:'card',name:t.name||c.name,date:t.date,amount:t.kind==='adjustment'?-t.amount:-sign*t.amount,cardId:c.id,accountId:c.accountId,cardPurchase:true,dueDate:t.dueDate||cardDue(t.date,c),status:t.status,categoryId:t.categoryId,memo:t.memo||'',transactionId:t.id};}
  let amount=t.kind==='transfer'?-Number(t.amount)-Number(t.fee||0):sign*Number(t.amount);if(t.kind==='adjustment')amount=Number(t.amount);
- return {...(t.salarySourceId?t.salarySnapshot:{}),id:t.id,name:t.name||({expense:'支出',income:'収入',transfer:'振替',fee:'手数料',refund:'返金',cancel:'取消',adjustment:'残高調整'})[t.kind],date:t.date,amount,debitCardId:t.debitCardId,accountId:t.accountId,toAccountId:t.kind==='transfer'?t.toAccountId:null,transferAmount:Number(t.amount),status:t.status,source:t.salarySourceId?'salary':t.source||'manual',salarySourceId:t.salarySourceId,employerId:t.salarySnapshot?.employerId,categoryId:t.categoryId,memo:t.memo||'',transactionId:t.id,confidence:t.confidence??(t.kind==='income'?s.settings.confidence.extra:100),...(t.reserveCardId?{cardId:t.reserveCardId,reserveRelease:t.reserveRelease}:{} )};
+ return {...(t.salarySourceId?t.salarySnapshot:{}),id:t.id,name:t.name||({expense:'支出',income:'収入',transfer:'振替',fee:'手数料',refund:'返金',cancel:'取消',adjustment:'残高調整',reimbursement:'立替精算受取'})[t.kind],date:t.date,amount,debitCardId:t.debitCardId,accountId:t.accountId,toAccountId:t.kind==='transfer'?t.toAccountId:null,transferAmount:Number(t.amount),status:t.status,source:t.kind==='reimbursement'?'reimbursement':t.salarySourceId?'salary':t.source||'manual',salarySourceId:t.salarySourceId,employerId:t.salarySnapshot?.employerId,categoryId:t.categoryId,memo:t.memo||'',transactionId:t.id,confidence:t.confidence??(t.kind==='income'?s.settings.confidence.extra:100),...(t.reserveCardId?{cardId:t.reserveCardId,reserveRelease:t.reserveRelease}:{} )};
 }
 export function generateEvents(s,asOf=today(),horizon=addDays(asOf,90)){
  const events=[],warnings=[];const replacement=new Map(s.overrides.map(o=>[o.sourceId,o]));
@@ -139,7 +141,7 @@ export function calculate(s,asOf=today()){
  const sorted=pending.sort((a,b)=>a.date.localeCompare(b.date)||(a.amount<0?-1:1)-(b.amount<0?-1:1));
  let income=0,expense=0;
  for(const e of sorted){const date=e.date<asOf?asOf:e.date;if(date>end)continue;
-   if(e.cardPurchase){changeReserve(e.cardId,e.amount);}else{const factor=e.amount>0&&!e.toAccountId?Number(e.confidence??100)/100:1;applyCash(e,factor);if(e.reserveRelease)changeReserve(e.cardId,-e.reserveRelease);if(included.has(e.accountId)){if(e.amount>0)income+=round(e.amount*factor);else expense-=e.amount;}}
+   if(e.cardPurchase){changeReserve(e.cardId,e.amount);}else{const factor=e.amount>0&&!e.toAccountId?Number(e.confidence??100)/100:1;applyCash(e,factor);if(e.reserveRelease)changeReserve(e.cardId,-e.reserveRelease);if(included.has(e.accountId)){if(e.amount>0){if(e.source!=='reimbursement')income+=round(e.amount*factor);}else expense-=e.amount;}}
    const available=total()-reserved-floor;if(available<minimum){minimum=available;limitingDate=date;}if(date<=shortEnd)shortMinimum=Math.min(shortMinimum,available);
    for(const a of active){if(balances[a.id]<accountMin[a.id])accountMin[a.id]=balances[a.id];if(balances[a.id]<0){const w=shortfalls.find(w=>w.accountId===a.id);if(!w)shortfalls.push({date,accountId:a.id,amount:-balances[a.id],name:e.name,worstDate:date,worstAmount:-balances[a.id]});else if(-balances[a.id]>w.worstAmount){w.worstDate=date;w.worstAmount=-balances[a.id];}}}
    points.push({date,balance:total(),reserved,available,accounts:{...balances},eventId:e.id});
@@ -175,6 +177,7 @@ export function budgets(s,date=today(),range=null){
 
 export function cancelTransaction(s,transactionId,date=today()){
  const t=s.transactions.find(t=>t.id===transactionId);if(!t)throw Error('取引が見つかりません。');
+ if(t.kind==='reimbursement'||s.transactions.some(r=>r.kind==='reimbursement'&&r.expenseId===t.id))throw Error('精算記録は直接編集・削除してください。回収済みの支出は精算記録を先に修正してください。');
  if(t.reverses&&(t.debtId||t.debtSettlement))throw Error('借入の取消記録は再取消できません。必要な借入・返済を新しく記録してください。');
  if(t.debtOperationId&&!t.reverses){cancelDebtActivity(s,t.debtOperationId,date);return;}
  if(t.status==='planned'){s.transactions=s.transactions.filter(x=>x.id!==t.id);return;}
@@ -311,8 +314,10 @@ export function activityEntries(s,start,end,asOf=today()){
   else if(e.reserveRelease!==undefined){kind='settlement';}
   else if(t){if(t.kind==='transfer'){expense=Number(t.fee||0);kind='transfer';}else if(['expense','fee'].includes(t.kind)){expense=t.amount;kind='expense';}else if(['refund','cancel'].includes(t.kind)){expense=-t.amount;kind='refund';}else kind=t.kind;}
   else if(e.amount<0){expense=-e.amount;kind='expense';}else if(e.amount>0)kind='income';
+  const paymentAmount=expense;
+  if(t?.split&&expense!==0)expense=Math.sign(expense)*splitInfo(s,t).own;
   budgetAmount=t&&['draw','principal'].includes(t.debtComponent)?0:expense;
-  return {...e,expense,budgetAmount,kind,memo:t?.memo||e.memo||'',name:e.name||t?.name||'記録',categoryId:e.categoryId||'',forecast:e.status!=='actual'&&e.source==='salary'&&e.estimatedDays>0};
+  return {...e,expense,paymentAmount,split:!!t?.split,budgetAmount,kind,memo:t?.memo||e.memo||'',name:e.name||t?.name||'記録',categoryId:e.categoryId||'',forecast:e.status!=='actual'&&e.source==='salary'&&e.estimatedDays>0};
  }).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
 }
 export function calendarData(s,start,end,mode='all',asOf=today()){

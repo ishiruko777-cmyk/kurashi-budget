@@ -1,3 +1,4 @@
+import {validateSplitState} from './split.js?v=9b779995f8d0';
 /** Three-way merge: independent edits survive; conflicting fields require a user decision. */
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 export function mergeStates(base,local,remote){
@@ -16,6 +17,10 @@ export function mergeStates(base,local,remote){
   conflicts.push(path);return l;
  }
  const state=merge(base,local,remote,'data');
+ // Two devices collecting the same receivable need review even below its limit.
+ const changedReceipts=(before,after)=>new Set((after.transactions||[]).filter(t=>t.kind==='reimbursement'&&!same(t,(before.transactions||[]).find(b=>b.id===t.id))).map(t=>t.expenseId));
+ const localReceipts=changedReceipts(base,local),remoteReceipts=changedReceipts(base,remote);
+ for(const parent of localReceipts)if(remoteReceipts.has(parent)&&!same(local.transactions.filter(t=>t.expenseId===parent),remote.transactions.filter(t=>t.expenseId===parent)))conflicts.push('data.splitReceipts.'+parent);
  // Two independent override IDs must not hide two actual payments behind one recurrence.
  if(Array.isArray(state.transactions)){
   const activeLinks=new Map();
@@ -25,6 +30,7 @@ export function mergeStates(base,local,remote){
    activeLinks.set(t.recurringSourceId||t.salarySourceId,t.id);
   }
  }
+ if(Array.isArray(state.transactions)&&Array.isArray(state.accounts)){try{validateSplitState(state);}catch{conflicts.push('data.splitSettlements');}}
  return {state,conflicts};
 }
 export function hasHouseholdData(s){return s.setupDone||s.accounts.length>0||s.transactions.length>0;}
