@@ -10,3 +10,5 @@
 /* Shared monthly details and distinguishable calendar amounts. */
 .budget-detail{border-bottom:1px solid var(--line);padding-bottom:12px}.budget-detail summary{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;list-style-position:inside}.budget-detail summary strong{font-size:.8rem}.budget-detail .row-main small{white-space:normal;overflow-wrap:anywhere}.status-switch{margin:14px 0;flex-wrap:wrap}.calendar button{height:118px}.calendar-actual{color:#9a4a00;font-weight:600}.calendar-planned{color:#183fda;border-bottom:1px dashed #8198e7}#recurring-link-field:empty{display:none}
 @media(max-width:760px){.calendar button{height:108px}.status-switch button{padding:8px 10px;font-size:.75rem}.budget-detail summary strong{display:block;width:100%;font-size:.76rem}.budget-detail .row{flex-wrap:wrap}.calendar small{font-size:.57rem}}
+
+.salary-completion{border:1px solid var(--line);border-radius:10px;padding:12px;margin:16px 0}.salary-completion p{font-size:.8rem;line-height:1.7}.salary-completion button{min-height:44px;width:100%;white-space:normal;text-align:left}

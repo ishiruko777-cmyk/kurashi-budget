@@ -1,4 +1,4 @@
-import {today,day,iso,monthDate,addDays,cardDue,generateEvents,validateState,recordDebtActivity,resolvePayment} from './core.js?v=4954e00c281a';
+import {today,day,iso,monthDate,addDays,cardDue,generateEvents,validateState,recordDebtActivity,resolvePayment} from './core.js?v=ee31555c900b';
 const clone=v=>structuredClone(v);
 function atomic(s,fn){const next=clone(s);const result=fn(next);validateState(next);Object.assign(s,next);return result;}
 function validDate(date){return typeof date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(date)&&!Number.isNaN(day(date).getTime())&&iso(day(date))===date;}
