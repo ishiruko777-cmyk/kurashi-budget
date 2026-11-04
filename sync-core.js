@@ -19,10 +19,10 @@ export function mergeStates(base,local,remote){
  // Two independent override IDs must not hide two actual payments behind one recurrence.
  if(Array.isArray(state.transactions)){
   const activeLinks=new Map();
-  for(const t of state.transactions)if(t.recurringSourceId&&!t.reverses&&!state.transactions.some(x=>x.reverses===t.id)){
-   const previous=activeLinks.get(t.recurringSourceId);
-   if(previous&&previous!==t.id)conflicts.push('data.recurringLinks.'+t.recurringSourceId);
-   activeLinks.set(t.recurringSourceId,t.id);
+  for(const t of state.transactions)if((t.recurringSourceId||t.salarySourceId)&&!t.reverses&&!state.transactions.some(x=>x.reverses===t.id)){
+   const previous=activeLinks.get(t.recurringSourceId||t.salarySourceId);
+   if(previous&&previous!==t.id)conflicts.push('data.cashflowLinks.'+(t.recurringSourceId||t.salarySourceId));
+   activeLinks.set(t.recurringSourceId||t.salarySourceId,t.id);
   }
  }
  return {state,conflicts};
