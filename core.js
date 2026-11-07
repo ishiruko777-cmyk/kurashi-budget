@@ -1,4 +1,4 @@
-import {splitInfo,validateSplitState} from './split.js?v=9b779995f8d0';
+import {splitInfo,validateSplitState} from './split.js?v=aabd4d155268';
 /** Money is integer JPY. Dates are local calendar ISO strings; no UTC conversion of user dates. */
 export const id=()=>globalThis.crypto.randomUUID();
 export const today=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;};
@@ -69,7 +69,7 @@ export function shiftPay(shift,e){
 }
 export function payroll(s,asOf=today(),horizon=addDays(asOf,90)){
  const groups=new Map();
- for(const shift of [...s.shifts,...forecastShifts(s,asOf,horizon)]){const e=s.employers.find(x=>x.id===shift.employerId);if(!e||shift.active===false)continue;const date=payrollDate(shift.date,e),key=`salary:${e.id}:${date}`;let g=groups.get(key);if(!g){g={gross:0,estimatedGross:0,estimatedDays:0,estimatedDates:[],recordedDays:0,id:key,source:'salary',name:`${e.name} 給与`,date,accountId:e.accountId,amount:0,trusted:0,worked:0,employerId:e.id};groups.set(key,g);}const p=shiftPay(shift,e);g.gross+=p.gross;if(shift.forecast){g.estimatedGross+=p.gross;g.estimatedDays++;g.estimatedDates.push(shift.date);}else g.recordedDays++;g.amount+=p.net;g.trusted+=p.net*Number(shift.forecast?(e.forecastConfidence??s.settings.confidence.tentative??50):(s.settings.confidence[shift.status]??0))/100;if(shift.status==='worked')g.worked+=p.net;}
+ for(const shift of [...s.shifts,...forecastShifts(s,asOf,horizon)]){const e=s.employers.find(x=>x.id===shift.employerId);if(!e||shift.active===false||shift.status==='off')continue;const date=payrollDate(shift.date,e),key=`salary:${e.id}:${date}`;let g=groups.get(key);if(!g){g={gross:0,estimatedGross:0,estimatedDays:0,estimatedDates:[],recordedDays:0,id:key,source:'salary',name:`${e.name} 給与`,date,accountId:e.accountId,amount:0,trusted:0,worked:0,employerId:e.id};groups.set(key,g);}const p=shiftPay(shift,e);g.gross+=p.gross;if(shift.forecast){g.estimatedGross+=p.gross;g.estimatedDays++;g.estimatedDates.push(shift.date);}else g.recordedDays++;g.amount+=p.net;g.trusted+=p.net*Number(shift.forecast?(e.forecastConfidence??s.settings.confidence.tentative??50):(s.settings.confidence[shift.status]??0))/100;if(shift.status==='worked')g.worked+=p.net;}
  for(const g of groups.values()){
   const e=s.employers.find(x=>x.id===g.employerId),allowance=Number(e.allowance||0),fixedAllowance=round(allowance*(1-(e.deduct?Number(e.deductionRate||0)/100:0)));
   g.amount+=fixedAllowance;g.trusted+=fixedAllowance*(g.amount>fixedAllowance?(g.trusted/(g.amount-fixedAllowance)):0);g.gross+=round(allowance);
@@ -110,6 +110,11 @@ export function generateEvents(s,asOf=today(),horizon=addDays(asOf,90)){
  for(const o of s.overrides)if(o.status==='actual'&&o.snapshot&&!events.some(e=>e.id===o.sourceId))events.push({...o.snapshot,...o,id:o.sourceId});
  return {events,warnings:[...new Set(warnings)]};
 }
+/** Forecasts use day-end snapshots, with credited income before outgoing payments. */
+export function forecastDays(events,asOf,end){
+ const grouped=new Map();for(const e of events){const date=e.date<asOf?asOf:e.date;if(date>end)continue;if(!grouped.has(date))grouped.set(date,[]);grouped.get(date).push(e);}
+ return [...grouped].sort(([a],[b])=>a.localeCompare(b)).map(([date,entries])=>[date,entries.sort((a,b)=>Number(!(!a.cardPurchase&&a.amount>0))-Number(!(!b.cardPurchase&&b.amount>0))||a.id.localeCompare(b.id))]);
+}
 export function calculate(s,asOf=today()){
  const shortEnd=addDays(asOf,90);let end=shortEnd;
  for(const g of s.goals)if(g.active!==false&&g.dueDate>end)end=g.dueDate;
@@ -138,20 +143,35 @@ export function calculate(s,asOf=today()){
  let minimum=assets-reserved-floor,shortMinimum=minimum,limitingDate=asOf;
  const accountMin={...balances},shortfalls=[],points=[{date:asOf,balance:assets,reserved,available:minimum,accounts:{...balances}}];
  for(const a of active)if(balances[a.id]<0)shortfalls.push({date:asOf,accountId:a.id,amount:-balances[a.id],name:'現在残高',worstDate:asOf,worstAmount:-balances[a.id]});
- const sorted=pending.sort((a,b)=>a.date.localeCompare(b.date)||(a.amount<0?-1:1)-(b.amount<0?-1:1));
+ const sameDayRisks=[];
  let income=0,expense=0;
- for(const e of sorted){const date=e.date<asOf?asOf:e.date;if(date>end)continue;
-   if(e.cardPurchase){changeReserve(e.cardId,e.amount);}else{const factor=e.amount>0&&!e.toAccountId?Number(e.confidence??100)/100:1;applyCash(e,factor);if(e.reserveRelease)changeReserve(e.cardId,-e.reserveRelease);if(included.has(e.accountId)){if(e.amount>0){if(e.source!=='reimbursement')income+=round(e.amount*factor);}else expense-=e.amount;}}
-   const available=total()-reserved-floor;if(available<minimum){minimum=available;limitingDate=date;}if(date<=shortEnd)shortMinimum=Math.min(shortMinimum,available);
-   for(const a of active){if(balances[a.id]<accountMin[a.id])accountMin[a.id]=balances[a.id];if(balances[a.id]<0){const w=shortfalls.find(w=>w.accountId===a.id);if(!w)shortfalls.push({date,accountId:a.id,amount:-balances[a.id],name:e.name,worstDate:date,worstAmount:-balances[a.id]});else if(-balances[a.id]>w.worstAmount){w.worstDate=date;w.worstAmount=-balances[a.id];}}}
-   points.push({date,balance:total(),reserved,available,accounts:{...balances},eventId:e.id});
+ for(const [date,entries] of forecastDays(pending,asOf,end)){
+   const opening={...balances},outgoing={},incoming={};
+   for(const e of entries){
+    if(e.cardPurchase){changeReserve(e.cardId,e.amount);continue;}
+    const factor=e.amount>0&&!e.toAccountId?Number(e.confidence??100)/100:1;
+    if(e.amount<0)outgoing[e.accountId]=(outgoing[e.accountId]||0)-e.amount;
+    if(e.amount>0)incoming[e.accountId]=(incoming[e.accountId]||0)+round(e.amount*factor);
+    if(e.toAccountId)incoming[e.toAccountId]=(incoming[e.toAccountId]||0)+e.transferAmount;
+    applyCash(e,factor);if(e.reserveRelease)changeReserve(e.cardId,-e.reserveRelease);
+    if(included.has(e.accountId)){if(e.amount>0){if(e.source!=='reimbursement')income+=round(e.amount*factor);}else expense-=e.amount;}
+   }
+   const available=total()-reserved-floor,cause=entries.filter(e=>e.amount<0&&!e.cardPurchase).sort((a,b)=>a.amount-b.amount)[0]||entries.at(-1);
+   if(available<minimum){minimum=available;limitingDate=date;}if(date<=shortEnd)shortMinimum=Math.min(shortMinimum,available);
+   for(const a of active){
+    if(balances[a.id]<accountMin[a.id])accountMin[a.id]=balances[a.id];
+    if(balances[a.id]<0){const w=shortfalls.find(w=>w.accountId===a.id);if(!w)shortfalls.push({date,accountId:a.id,amount:-balances[a.id],name:cause?.name||'同日の収支',worstDate:date,worstAmount:-balances[a.id]});else if(-balances[a.id]>w.worstAmount){w.worstDate=date;w.worstAmount=-balances[a.id];}}
+    const automatic=entries.filter(e=>e.accountId===a.id&&e.amount<0&&!e.cardPurchase&&(e.source==='card'||e.source==='debt'||e.debitCardId||e.id.startsWith('recurring:')));
+    if(balances[a.id]>=0&&(incoming[a.id]||0)>0&&(outgoing[a.id]||0)>Math.max(0,opening[a.id])&&automatic.length)sameDayRisks.push({date,accountId:a.id,amount:Math.max(0,(outgoing[a.id]||0)-opening[a.id]),names:automatic.map(e=>e.name)});
+   }
+   points.push({date,balance:total(),reserved,available,accounts:{...balances},eventId:cause?.id,eventIds:entries.map(e=>e.id),daily:true});
  }
  const safe=Math.max(0,Math.floor(minimum)),longReserve=Math.max(0,shortMinimum-minimum),reference=s.settings.referenceDate>=asOf?s.settings.referenceDate:monthDate(asOf,asOf>=monthDate(asOf,0,s.settings.salaryDay)?1:0,s.settings.salaryDay),dayCount=Math.max(1,days(asOf,reference)+1);
  const savings=Object.fromEntries(active.filter(a=>included.has(a.id)).map(a=>[a.id,Math.max(0,Math.min(safe,Math.floor(accountMin[a.id])))]));
  const source=s.settings.savingsSource||active.find(a=>included.has(a.id))?.id;
  const overdue=pending.filter(e=>!e.cardPurchase&&e.date<asOf);
  const limitingPoint=points.find(p=>p.date===limitingDate&&p.available===minimum)||points[0],firstFloorBreach=points.find(p=>p.available<0)||null;
- return {asOf,end,shortEnd,assets,current,minimum,safe,shortSafe:Math.max(0,shortMinimum),longReserve,limitingDate,limitingPoint,firstFloorBreach,firstCashShortfall:points.find(p=>p.balance<0)||null,salaryCoverage:salaryCoverage(s,events,asOf,shortEnd),income,expense,floor,reservedNow:points[0].reserved,points,events:pending.filter(e=>!e.cardPurchase).sort((a,b)=>a.date.localeCompare(b.date)),allEvents:events,shortfalls,warnings,overdue,savings,savingsSource:source,savable:savings[source]||0,daily:round(Math.max(0,safe-Number(s.settings.dailySpecial||0))/dayCount),dayCount,reference};
+ return {asOf,end,shortEnd,assets,current,minimum,safe,shortSafe:Math.max(0,shortMinimum),longReserve,limitingDate,limitingPoint,firstFloorBreach,firstCashShortfall:points.find(p=>p.balance<0)||null,salaryCoverage:salaryCoverage(s,events,asOf,shortEnd),income,expense,floor,reservedNow:points[0].reserved,points,events:pending.filter(e=>!e.cardPurchase).sort((a,b)=>a.date.localeCompare(b.date)),allEvents:events,shortfalls,sameDayRisks,warnings,overdue,savings,savingsSource:source,savable:savings[source]||0,daily:round(Math.max(0,safe-Number(s.settings.dailySpecial||0))/dayCount),dayCount,reference};
 }
 
 /** Explicit acknowledgement, never an assumed payment and never a cash posting. */
@@ -329,9 +349,15 @@ export function immediateSpending(s,result){
  const asOf=result.asOf,known=result.events.filter(e=>e.source==='salary'&&e.amount>0&&e.date>=asOf).map(e=>e.date).sort();
  const employerDates=s.employers.filter(e=>e.active!==false).map(e=>monthDate(asOf,asOf>=monthDate(asOf,0,e.payDay)?1:0,e.payDay)).sort();const nextPayDate=known[0]||employerDates[0]||monthDate(asOf,asOf>=monthDate(asOf,0,s.settings.salaryDay)?1:0,s.settings.salaryDay);
  const included=new Set(s.accounts.filter(a=>a.active!==false&&a.include!==false).map(a=>a.id));let commitment=result.reservedNow,maxCommitment=commitment,cashOut=0;
- for(const e of [...result.allEvents].filter(e=>(e.cardPurchase?e.date>asOf:!(e.status==='actual'&&e.date<=asOf))&&e.date<=nextPayDate).sort((a,b)=>a.date.localeCompare(b.date)||(a.amount<0?-1:1)-(b.amount<0?-1:1))){
-  if(e.cardPurchase){if(included.has(e.accountId))commitment+=e.amount;}else{let change=included.has(e.accountId)?Math.min(0,e.amount):0;if(e.toAccountId&&included.has(e.accountId)&&included.has(e.toAccountId))change+=e.transferAmount;cashOut-=change;commitment-=change;if(e.reserveRelease&&included.has(e.accountId))commitment-=e.reserveRelease;}
-  maxCommitment=Math.max(maxCommitment,commitment);
+ const future=result.allEvents.filter(e=>e.cardPurchase?e.date>asOf:!(e.status==='actual'&&e.date<=asOf));
+ for(const [,entries] of forecastDays(future,asOf,nextPayDate)){
+  let outgoing=0,incoming=0,release=0;
+  for(const e of entries){
+   if(e.cardPurchase){if(included.has(e.accountId))commitment+=e.amount;continue;}
+   if(included.has(e.accountId)){outgoing-=Math.min(0,e.amount);if(e.amount>0)incoming+=round(e.amount*Number(e.confidence??100)/100);if(e.reserveRelease)release+=e.reserveRelease;}
+   if(e.toAccountId&&included.has(e.toAccountId)){if(included.has(e.accountId))outgoing-=e.transferAmount;else incoming+=e.transferAmount;}
+  }
+  const netOut=Math.max(0,outgoing-incoming);cashOut+=netOut;commitment+=netOut-release;maxCommitment=Math.max(maxCommitment,commitment);
  }
  return {assets:result.assets,nextPayDate,cashOut,cardReserve:result.reservedNow,required:Math.max(0,maxCommitment),floor:result.floor,available:Math.max(0,Math.floor(result.assets-result.floor-maxCommitment)),longTermSafe:result.safe};
 }

@@ -1,4 +1,4 @@
-import {today,day,iso,monthDate,addDays,cardDue,generateEvents,validateState,recordDebtActivity,resolvePayment} from './core.js?v=9b779995f8d0';
+import {today,day,iso,monthDate,addDays,cardDue,generateEvents,validateState,recordDebtActivity,resolvePayment,shiftPay} from './core.js?v=aabd4d155268';
 const clone=v=>structuredClone(v);
 function atomic(s,fn){const next=clone(s);const result=fn(next);validateState(next);Object.assign(s,next);return result;}
 function validDate(date){return typeof date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(date)&&!Number.isNaN(day(date).getTime())&&iso(day(date))===date;}
@@ -32,4 +32,29 @@ export function recordReimbursement(s,expenseId,receipt){return atomic(s,n=>{
  if(!receipt.id||n.transactions.some(t=>t.id===receipt.id))throw Error('この精算はすでに記録されています。');
  const t={id:receipt.id,kind:'reimbursement',expenseId,amount:receipt.amount,date:receipt.date,accountId:receipt.accountId,name:receipt.name||'立替精算受取',memo:receipt.memo||'',status:'actual'};
  validateTransaction(n,t);n.transactions.push(t);return t.id;
+});}
+
+export function shiftMonthReport(s,month){
+ if(!/^\d{4}-\d{2}-01$/.test(month)||!validDate(month))throw Error('勤務月を確認してください。');
+ const end=monthDate(month,1,1),shifts=s.shifts.filter(sh=>sh.date>=month&&sh.date<end).sort((a,b)=>a.date.localeCompare(b.date)||a.start.localeCompare(b.start)||a.id.localeCompare(b.id));
+ const working=shifts.filter(sh=>sh.active!==false&&sh.status!=='off'),counts={tentative:0,confirmed:0,worked:0,off:0,inactive:0};let minutes=0,workedMinutes=0,net=0;
+ for(const sh of shifts){const key=sh.active===false?'inactive':sh.status;if(key in counts)counts[key]++;}
+ for(const sh of working){const e=s.employers.find(e=>e.id===sh.employerId);if(!e)continue;const pay=shiftPay(sh,e);minutes+=pay.minutes;net+=pay.net;if(sh.status==='worked')workedMinutes+=pay.minutes;}
+ return {shifts,counts,days:new Set(working.map(sh=>sh.date)).size,minutes,workedMinutes,net};
+}
+/** Preview holds complete selected records so cross-tab edits cannot be silently replaced. */
+export function previewShiftStatus(s,ids,status,asOf=today()){
+ if(!['worked','confirmed','tentative','off'].includes(status)||!Array.isArray(ids)||!ids.length||new Set(ids).size!==ids.length)throw Error('対象のシフトと変更後の状態を確認してください。');
+ const shifts=ids.map(id=>s.shifts.find(sh=>sh.id===id));
+ if(shifts.some(sh=>!sh||sh.active===false))throw Error('無効なシフトは一括変更できません。選び直してください。');
+ if(status==='worked'&&shifts.some(sh=>sh.date>asOf||sh.status==='off'))throw Error('未来・休みのシフトは勤務済みにできません。');
+ const changed=shifts.filter(sh=>sh.status!==status);if(!changed.length)throw Error('変更が必要なシフトがありません。');
+ return {status,asOf,shifts:clone(changed).sort((a,b)=>a.date.localeCompare(b.date)||a.start.localeCompare(b.start))};
+}
+export function applyShiftStatus(s,preview,asOf=today()){return atomic(s,n=>{
+ if(!preview?.shifts?.length)throw Error('シフトを選び直してください。');
+ for(const old of preview.shifts)if(JSON.stringify(n.shifts.find(sh=>sh.id===old.id))!==JSON.stringify(old))throw Error('確認中にシフトが更新されました。対象を確認し直してください。');
+ const checked=previewShiftStatus(n,preview.shifts.map(sh=>sh.id),preview.status,asOf);
+ for(const sh of checked.shifts)n.shifts.find(x=>x.id===sh.id).status=checked.status;
+ return checked.shifts.length;
 });}
